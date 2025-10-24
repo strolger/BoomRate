@@ -1,0 +1,7 @@
+3rd order polynomial fit to alphabeta vs. 
+UBVRI central wavelengths. Allow interpolating 
+with other filters. Obtain fit-parameters with
+PAW > sjpar
+
+ALPHA:  -0.23129  0.61744E-03  -0.93283E-07  0.39690E-11
+BETA:   10.333   -0.36749E-02   0.41348E-06 -0.15462E-10

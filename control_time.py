@@ -1,0 +1,803 @@
+#!/usr/bin/env pythonobs
+#### Note: Update with Holwerda extinction
+
+
+import os,sys,pdb,scipy,glob,pickle
+from pylab import *
+from scipy import stats
+from scipy.optimize import curve_fit
+from scipy.integrate import quad
+from matplotlib.font_manager import fontManager, FontProperties
+from matplotlib.ticker import MultipleLocator, FormatStrFormatter
+import datetime, time
+from matplotlib import dates as mdates
+from strolger_util import util as u
+from strolger_util import cosmocalc
+import volume
+
+import multiprocessing
+from functools import partial
+
+import warnings#,exceptions
+warnings.simplefilter("error",RuntimeWarning)
+
+
+m_root = os.environ['HOME']
+software = os.path.dirname('/'.join(os.path.realpath(__file__).split('/')[:-1]))
+sndata_root = m_root+'/Other_codes/SNANA/SNDATA_ROOT'
+model_path = sndata_root+'/snsed/non1a'
+
+
+vol_frac_a={ # Li et al. 2011
+    'iip': 0.524,
+    'iin': 0.064,
+    'iil': 0.073,
+    'ib' : 0.069,
+    'ic' : 0.176,
+    'ia' : 1,
+    'slsn':0.0002,
+    }
+vol_frac_b={ # Richardson et al. 2014
+    'iip': 0.409,
+    'iin': 0.116,
+    'iil': 0.094,
+    'ib' : 0.099,
+    'ic' : 0.199,
+    }
+
+vol_frac=vol_frac_a
+
+template_peak = {
+    'iip': -16.05,
+    'iin': -17.05,
+    'iil': -16.33,
+    'ib' : -15.05,
+    'ic' : -15.05,
+    'ibc': -15.05,
+    'ia' : -19.46,
+    'slsn': -21.7,
+    }
+
+absmags_li_2011 = {
+    'iip': [-15.66, 1.23, 0.16],
+    'iin': [-16.86, 1.61, 0.59],
+    'iil': [-17.44, 0.64, 0.22],
+    'ib' : [-17.01, 0.41, 0.17],
+    'ic' : [-16.04, 1.28, 0.31],
+    'ibc': [-16.04, 1.28, 0.31],
+    }
+
+absmags_richardson_2014 = {
+    'iip': [-16.80, 0.97, 0.37],
+    'iin': [-16.86, 1.61, 0.59],
+    #'iin': [-18.62, 1.48, 0.32],
+    'iil': [-17.98, 0.90, 0.34],
+    'ib' : [-17.54, 0.94, 0.33],
+    'ic' : [-16.67, 1.04, 0.40],
+    'ibc': [-16.67, 1.04, 0.40],
+    'ia' : [-19.26, 0.51, 0.20],
+    'slsn': [-21.7, 0.4,0.0], ## from Quimby+2013, by way of Gal-Yam 2018
+    ## 'slsn': [-30, 2.5,0.0], ## from Whalen et al. 2013
+    }
+absmags=absmags_richardson_2014
+
+#absmag_new = {}
+#for key in absmags.keys(): absmag_new[key]=[absmags[key][0]-absmags[key][2],absmags[key][1],absmags[key][2]]
+#absmags=absmag_new
+
+color_cor_Ia={
+    360:1.8,
+    442:0.15,
+    551:0.0,
+    663:-0.61,
+    806:-0.56
+    }
+
+color_cor_gen={
+    356:2.7,
+    472:0.15,
+    619:-0.3,
+    750:-0.61,
+    896:0.8
+    }
+
+color_cor_slsn={
+    356: 2.0,
+    472: 0.15,
+    }
+
+
+def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
+        parallel=False, extinction=True, obs_extin=True, Nproc=23, prev=45.,
+        passband = None, passskiprow=1, passwavemult=1000.,
+        plot=False, verbose=False):
+    sndata_root = m_root+'/Other_codes/SNANA/SNDATA_ROOT'
+    model_path = sndata_root+'/snsed/non1a'
+    
+    ### define the filters-- important for later
+    if verbose: print('defining restframe sloan filters...')
+    filter_dict={}
+
+    if 'ia' in type:
+        for bessel_filter in glob.glob(m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_?.dat'):
+            elam = get_central_wavelength(bessel_filter, wavemult=0.1)
+            filter_dict[elam]=bessel_filter
+    else:
+        for sdss_filter in glob.glob(sndata_root+'/filters/SDSS/SDSS_web2001/?.dat'):
+            elam = get_central_wavelength(sdss_filter, wavemult=0.1)
+            filter_dict[elam]=sdss_filter
+
+    ### observed filter
+    if verbose: print('observed filter...')
+    if passband is not None:
+        observed_filter = passband
+    else:
+        observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/JWST/NIRCAM/F444W_NRC_and_OTE_ModAB_mean.txt'
+        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/JWST/NIRCAM/F322W2_NRC_and_OTE_ModAB_mean.txt'
+        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_V.dat'
+        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/HST/HST_Candles/WFC3_IR_F160W.dat'
+        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/HST/HST_GOODS/F850LP_ACS.dat'
+    ofilter_cen = get_central_wavelength(observed_filter,skip=passskiprow,wavemult=passwavemult)
+    if verbose: print('observed filter effective wavelength= %4.1f nm'%ofilter_cen)
+
+    ### rest-frame lightcurve
+    if 'slsn'in type:
+        if verbose: print('getting best rest-frame lightcurve...')
+        rest_age,rflc = rest_frame_slsn_lightcurve(dstep=dstep,verbose=verbose)
+        best_rest_filter = min(rflc.keys(), key=lambda x:abs(x-(ofilter_cen/(1+redshift))))
+        if verbose: print('best rest frame filter match wavelength= %4.1f nm'%best_rest_filter)
+        observed_frame_lightcurve = zeros((len(array(rflc[best_rest_filter])),5))
+        observed_frame_lightcurve[:,0] = array(rflc[best_rest_filter]) - template_peak[type[0]]+absmags[type[0]][0]
+    elif 'ia' not in type:
+        if verbose: print('getting best rest-frame lightcurve...')
+        rest_age,rflc,models_used = rest_frame_lightcurve(type,dstep=dstep,verbose=verbose)
+        best_rest_filter = min(rflc.keys(), key=lambda x:abs(x-(ofilter_cen/(1+redshift))))
+        if verbose: print('best rest frame filter match wavelength= %4.1f nm'%best_rest_filter)
+        observed_frame_lightcurve=mean_pop(array(rflc[best_rest_filter]))-template_peak[type[0]]+absmags[type[0]][0]
+    else:
+        if verbose: print('getting best rest-frame lightcurve SNIA ...')
+        rest_age, rflc = rest_frame_Ia_lightcurve(dstep=dstep,verbose=verbose)
+        best_rest_filter = min(rflc.keys(), key=lambda x:abs(x-(ofilter_cen/(1+redshift))))
+        if verbose: print('best rest frame filter match wavelength= %4.1f nm'%best_rest_filter)
+        observed_frame_lightcurve = zeros((len(array(rflc[best_rest_filter])),5))
+        observed_frame_lightcurve[:,0] = array(rflc[best_rest_filter]) - template_peak[type[0]]+absmags[type[0]][0]
+        
+    ### kcorrecting rest lightcurve
+    if verbose: print('kcorrecting rest-frame lightcurve...')
+
+    model_pkl = 'SEDs_'+'_'.join(type)+'.pkl'
+    if not os.path.isfile(model_pkl):
+        pkl_file = open(model_pkl,'wb')
+        if verbose: print('... loading model SEDs')
+        models_used_dict={}
+        total_age_set=[]
+        if 'ia' in type:
+            models_used = ['Hsiao07']#'Foley07_lowz_uhsiao']
+            model_path = m_root+'/Other_codes/SNANA/SNDATA_ROOT/snsed'
+        if 'slsn' in type:
+            models_used = ['slsn_blackbody']
+
+        for model in models_used:
+            print('...... %s' %model)
+            if 'ia' not in type:
+                try:
+                    data = loadtxt(os.path.join(model_path,model+'.SED'))
+                except:
+                    print('testing', os.path.join(model_path,model+'.SED'))
+                    pdb.set_trace()
+            else:
+                data = loadtxt(os.path.join(model_path,model+'.dat'))
+            ages = list(set(data[:,0]))
+            models_used_dict[model]=data
+            for age in ages:
+                if age not in total_age_set:
+                    total_age_set.append(age)
+        pickle.dump(models_used_dict,pkl_file)
+        pkl_file.close()
+    else:
+        pkl_file = open(model_pkl,'rb')
+        if verbose: print('reading %s saved file' %model_pkl)
+        models_used_dict = pickle.load(pkl_file, encoding='latin1')
+        pkl_file.close()
+        total_age_set=[]
+        for model in models_used_dict.keys():
+            ages = list(set(models_used_dict[model][:,0]))
+            for age in ages:
+                if age not in total_age_set:
+                    total_age_set.append(age)
+        
+
+    f1 = loadtxt(observed_filter,skiprows=passskiprow)## for readinging in NIRCam tempaltes
+    f1[:,0]=f1[:,0]*passwavemult*10.
+    
+    f2 = loadtxt(filter_dict[best_rest_filter])
+    if 'ia' in type:
+        color_cor = color_cor_Ia
+    elif 'slsn' in type:
+        color_cor = color_cor_slsn
+    else:
+        color_cor = color_cor_gen
+    ccnl =  min(color_cor.keys(), key=lambda x:abs(x-best_rest_filter))
+    ccn = color_cor[ccnl] ## color correcting filers...
+
+    if redshift > 1.5:
+        vega_spec = loadtxt(software+'/templates/vega_model.dat')
+    else:
+        vega_spec = loadtxt(software+'/templates/vega_model_mod.dat')
+
+    start_time = time.time()
+    if parallel:
+        if verbose: print('... running parallel kcor by model SN age')
+        run_kcor_x= partial(kcor, f1=f1, f2=f2, models_used_dict=models_used_dict, redshift=redshift, vega_spec=vega_spec)
+        pool = multiprocessing.Pool(processes=Nproc)
+        result_list = pool.map(run_kcor_x, rest_age)
+        obs_kcor=array(result_list)
+        pool.close()
+    else:
+        obs_kcor=[]
+        if verbose: print('... running serial kcor iterating over model SN age')
+        for age in rest_age:
+            mkcor,skcor=kcor(age, f1,f2,models_used_dict,redshift,vega_spec)
+            if verbose > 1: print(age,mkcor)
+            obs_kcor.append([mkcor,skcor])
+        obs_kcor=array(obs_kcor)
+    if verbose: print('kcor processing time = %2.1f seconds'%(time.time()-start_time))
+
+    ### replace NaNs in kcor with linearly interpolated data, and constant interpolated error
+    idx = where(obs_kcor[:,0]==obs_kcor[:,0])
+    if len(idx[0]) > 0:
+        junk,obs_kcor_temp= u.recast(range(len(obs_kcor)),0.,idx[0],obs_kcor[idx][:,0])
+        obs_kcor[:,0]=obs_kcor_temp
+        idx2 = where(obs_kcor[:,1]!=obs_kcor[:,1])
+        obs_kcor_err_temp=np.interp(idx2[0],idx[0],obs_kcor[idx][:,1])
+        obs_kcor[idx2][:,1]=obs_kcor_err_temp
+        obs_kcor[:,1][where(obs_kcor[:,1]!=obs_kcor[:,1])]=0. ## remove nan's in errors.
+    apl_kcor = obs_kcor[:,0]
+
+    ### distance modulus and time dilation
+    d, mu, peak = cosmocalc.run(redshift)
+    td = (1.+redshift)
+
+    ## control times
+    template_light_curve=[]
+    prev_light_curve=[]
+    rest_base=baseline/td
+    for i,age in enumerate(rest_age):
+        if age - rest_base < min(rest_age):
+            template_light_curve.append(999.0)
+        else:
+            #idx = where(abs(age-rest_base - rest_age)<dstep)
+            idx = where((abs(age-rest_base - rest_age)<dstep) & (abs(age-rest_base - rest_age)==min(abs(age-rest_base - rest_age))))
+            template_light_curve.append(observed_frame_lightcurve[idx][:,0][0])
+        if age - rest_base-prev/td < min(rest_age):
+            prev_light_curve.append(999.0)
+        else:
+            idx2 = where(abs(age-rest_base-prev/td - rest_age)<dstep)
+            prev_light_curve.append(observed_frame_lightcurve[idx2][:,0][0])
+    template_light_curve=array(template_light_curve)
+    prev_light_curve=array(prev_light_curve)
+    tot_ctrl=0.0
+
+
+    if verbose: print('dstep=%.1f, dmstep=%.1f, dastep=%.1f'%(dstep,dmstep,dastep))
+    if plot:
+        ax1=subplot(121)
+        ax2=subplot(122)
+    ## loop on extinction function
+    ext_normalization=0.0
+    if extinction:
+        dastep = dastep
+        darange = arange(0.,5.0+dastep,dastep)
+    else:
+        dastep = 1.0
+        darange = [0.]
+    for da in darange:
+    ## loop on luminosity function
+        dmstep=dmstep
+        dmrange=arange(-5,5+dmstep,dmstep)
+        lum_normalization=0.0
+        for dm in dmrange:
+            f1 = 10**(-2./5.*(apl_kcor+observed_frame_lightcurve[:,0]+mu+dm+da+ccn))
+            f2 = 10**(-2./5.*(apl_kcor+template_light_curve+mu+dm+da+ccn))
+            diff_f = (f1 - f2)
+            delta_mag = zeros(diff_f.shape)
+            try:
+                tdx = where(diff_f>0)
+            except:
+                pdb.set_trace()
+            delta_mag[tdx]=-2.5*log10(diff_f[tdx])
+            delta_mag[where(diff_f<=0)]=99.99
+            check = where(delta_mag==0.)
+            #efficiency=det_eff(delta_mag,mc=sens,T=0.95, S=0.4)
+            efficiency=det_eff(delta_mag,mc=sens,T=0.98, S=0.23)
+
+            f3 = 10**(-2./5.*(apl_kcor+prev_light_curve+mu+dm+da+ccn))
+            diff_f2 = (f2 - f3)
+            delta_mag2 = zeros(diff_f2.shape)
+            tdx = where(diff_f2 > 0)
+            delta_mag2[tdx]=-2.5*log10(diff_f2[tdx])
+            delta_mag2[where(diff_f2<=0)]=99.99
+            check2 = where(delta_mag2==0.)
+            efficiency2=det_eff(delta_mag2,mc=sens, T=0.98, S=0.23)
+            #efficiency2=det_eff(delta_mag2,mc=sens, T=0.95, S=0.4)
+
+            if plot:
+                ymin=min(apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn)-6.0
+                ymax=min(apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn)+8.5
+                ax1.plot(rest_age,apl_kcor+observed_frame_lightcurve[:,0]+mu+dm+da+ccn,'r-')
+                ax1.plot(rest_age,apl_kcor+template_light_curve+mu+dm+da+ccn,'k-')
+                ax1.plot(rest_age,apl_kcor+prev_light_curve+mu+dm+da+ccn,'k--')
+                ax2.plot(rest_age,efficiency,'k-')
+                ax2.plot(rest_age,efficiency2,'k--')
+                ax1.set_ylim(ymax,ymin)
+                ax2.set_ylim(0,1.2)
+                
+            sig_m = absmags[type[0]][1]
+            ## Holz & Linder GL LumFunc smoothing
+            sig_gl = 0.093*(redshift)
+            sig_m = sqrt(sig_m**2+sig_gl**2)
+            
+            P_lum= scipy.stats.norm(absmags[type[0]][0],sig_m).pdf(absmags[type[0]][0]+dm)
+            if extinction:
+                if 'ia' in type:
+                    P_ext = ext_dist_Ia(da, observed_filter, redshift, passskiprow, passwavemult)
+                else:
+                    P_ext = ext_dist(da,observed_filter,redshift,passskiprow, passwavemult, obs_extin=obs_extin)#, Rv=8.0)
+            else:
+                P_ext=1.0
+            if prev > 0:
+                idx = where(efficiency2 < 0.9)
+                tot_ctrl += nansum(efficiency[idx])*P_lum*P_ext*dstep*dmstep*dastep
+            else:
+                tot_ctrl += nansum(efficiency)*P_lum*P_ext*dstep*dmstep*dastep
+            lum_normalization += P_lum*dmstep
+        ext_normalization += P_ext*dastep
+    if plot: savefig('efficiencies.png')
+    ## fractional bias correction-- The relative number of each subtype one would expect in a volume
+    ## Using z=0.0 observations from Li et al. 2011, already corrected for malmquist bias
+    rel_num = (vol_frac[type[0]])/sum(list(vol_frac.values()))
+
+
+    ## malmquist bias correction-- use this if going with some other measure of relative number
+    #rel_num=1.0
+    #rel_lum = 10.**((absmags[type[0]][0]-(sens-mu))/(-2.5))
+    #rel_num = rel_lum**(1.5)*rel_num
+
+    try:
+        #tot_ctrl=rel_num*tot_ctrl/(lum_normalization*ext_normalization)#*td
+        if ext_normalization > 1e40: 
+            tot_ctrl = 0
+        else:
+            tot_ctrl=0.5*tot_ctrl/(lum_normalization*ext_normalization)
+    except:
+        pdb.set_trace()
+    if verbose: print("Control Time= %4.2f observed frame days" %tot_ctrl)#, lum_normalization, ext_normalization)
+
+    if plot:
+        clf()
+        ax = subplot(211)
+        ymin=min(apl_kcor+observed_frame_lightcurve[:,0]+mu)-1.0
+        ymax=min(observed_frame_lightcurve[:,0]+mu)+3.5
+        xmin=(-50*td)
+        xmax=(140*td)
+        ax.plot(rest_age*td,apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn,'r--')
+        ax.plot(rest_age*td,observed_frame_lightcurve[:,0]+mu+ccn,'k-')
+        sig = sqrt(absmags[type[0]][1]**2.+obs_kcor[:,1]**2.)
+        ax.fill_between(rest_age*td, apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn+sig,
+                        apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn-sig,
+                        facecolor='red',alpha=0.3,interpolate=True)
+                        
+        ax.set_ylim(ymax,ymin)
+        ax.set_xlim(xmin,xmax)
+        ax.set_xlabel('Observed Frame Age (Days)')
+        ax.set_ylabel('Observed Magnitude (Vega)')
+    
+        ax2 = subplot (212)
+        ymin=min(observed_frame_lightcurve[:,0])-1.0
+        ymax=min(observed_frame_lightcurve[:,0])+3.5
+        xmin=(-50)
+        xmax=(140)
+        ax2.plot(rest_age,observed_frame_lightcurve[:,0],'k-')
+        ax2.fill_between(rest_age,
+                         observed_frame_lightcurve[:,0]+absmags[type[0]][1],
+                         observed_frame_lightcurve[:,0]-absmags[type[0]][1],
+                         facecolor='black', alpha=0.3,interpolate=True)
+        ax2.set_ylim(ymax,ymin)
+        ax2.set_xlim(xmin,xmax)
+        ax2.set_xlabel('Rest Frame Age (Days)')
+        ax2.set_ylabel('Closest template Abs Mag (Vega)')
+        savefig('lightcurves.png')
+    return(tot_ctrl/365.25)
+
+
+def det_eff(delta_mag,mc=25.8, T=1.0, S=0.4):
+    result=T/(1+exp((delta_mag-mc)/S))
+    return(result)
+
+def det_eff_box(delta_mag,mc=25.8):
+    result = zeros(delta_mag.shape)
+    result[where(delta_mag <=25.8)]=1.0
+    return(result)
+
+def get_central_wavelength(filter_file, skip=0, wavemult=1.):
+    filter_data = loadtxt(filter_file,skiprows=skip)
+    filter_data[:,0]=filter_data[:,0]*wavemult
+    fit_x = arange(min(filter_data[:,0])-25.,max(filter_data[:,0])+25.,5.)
+    (junk,fit_y) = u.recast(fit_x,0.,filter_data[:,0],filter_data[:,1])
+    elam = int(sum(fit_y*fit_x)/sum(fit_y)+0.5)
+    return(elam)
+    
+    
+def read_lc_model(model):
+    f = open (model,'r')
+    lines = f.readlines()
+    f.close()
+    filters=[]
+    lcdata = []
+    for line in lines:
+        if line.startswith('FILTER'):
+            filter_path = line.split()[2]
+            filter_path = filter_path.replace('$SNDATA_ROOT',sndata_root)
+            filter_path = filter_path.replace('SDSS','SDSS/SDSS_web2001')
+            elam=get_central_wavelength(filter_path, wavemult=0.1)
+            filters.append(elam)
+        if line.startswith('EPOCH'):
+            c = list(map(float,line.split()[1:]))
+            lcdata.append(c)
+        if line.startswith('SNTYPE'):
+            type = line.split()[1]
+    return(array(filters), array(lcdata), type)
+            
+        
+def match_peak(model):
+    modelname = os.path.basename(model).replace('.DAT','').lower()
+    f = open(model_path+'/SIMGEN_INCLUDE_NON1A.INPUT')
+    lines = f.readlines()
+    f.close()
+    magoff=0.0
+    for line in lines:
+        if line.startswith('NON1A:'):
+            if modelname == line.split()[-1].replace('(','').replace(')','').lower():
+                magoff = float(line.split()[3])
+                break
+    return(magoff)
+                            
+def mean_pop(mag_array):
+    data =[]
+    for i in range(len(mag_array[0])):
+        try:
+            avg = u.binmode(mag_array[:,i])[0]
+        except:
+            avg = average(mag_array[:,i])
+
+        sig = std(mag_array[:,i])
+        data.append([avg,1.0*sig,2.0*sig,max(mag_array[:,i]),min(mag_array[:,i])])
+    return(array(data))
+
+def rest_frame_lightcurve(types,dstep=3,verbose=True):
+    models = glob.glob(model_path+'/*.DAT')
+    rest_age = arange(-50,120,dstep)
+    mag_dict={}
+    models_used=[]
+    for model in models:
+        filters,mdata,type=read_lc_model(model)
+        magoff = match_peak(model)
+        for cnt,filter in enumerate(filters):
+            if type.lower() in types  and magoff!=0.0: ## models with no magoff are not likely reliable
+                (junk,new_y)=u.recast(rest_age,0.,mdata[:,0],mdata[:,cnt+1]+magoff)
+                if average(new_y) > 30:
+                    if verbose>1: print('Omitting ',model, filter, average(new_y))
+                    continue
+                if os.path.basename(model)[:-4] not in models_used:
+                    models_used.append(os.path.basename(model)[:-4])
+                try:
+                    mag_dict[filter].append(new_y)
+                except:
+                    mag_dict[filter]=[new_y]
+    return(rest_age,mag_dict,models_used)
+
+
+def rest_frame_Ia_lightcurve(dstep=3, verbose=True):
+    models_dir = m_root+'/Other_codes/SNANA/SNDATA_ROOT/models/mlcs2k2/mlcs2k2.v007/'
+    rest_age = arange(-20,120,dstep)
+    ## rest_age= arange(-20, -7, dstep) ## to limit to pre-peak discoveries
+    mag_dict={}
+    for model in glob.glob(models_dir+'vectors_?.dat'):
+        data = loadtxt(model)
+        junk, yy = u.recast(rest_age, 0., data[:,0],data[:,1])
+        filter = os.path.basename(model).split('_')[1][0]
+        elam = get_central_wavelength(m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_'+filter+'.dat', wavemult=0.1)
+        mag_dict[elam]=yy
+    return(rest_age,mag_dict)
+    
+    
+def rest_frame_slsn_lightcurve(dstep=3, verbose=True, tm=29.94, b14=3.82, pms=1.0):
+    ### from a perscription from Inserra et al. 2013
+    phase= arange(-30,120,dstep) #rest_age
+       
+    Ek = 1.0e51
+    k = 0.1
+ 
+    xt =phase+15 ## this model works from the approx. explosion date, changing it to phase
+    idx = where(xt==0)
+    if len(idx[0]) > 0.:
+        xt[idx]=0.1
+    Mej=((tm*3600*24)*(13.7*3e10)**(1/2.)*(1.05)**(-1.)*k**(-1/2.)*Ek**(1/4.))**(4/3.)
+    tp = 4.7*b14**(-2.)*pms**2
+    delt = 1-exp(-(9*k*Mej**2*xt**(-2.))/(40*pi*Ek))
+    lums = []
+    for t in xt:
+        Lum = 4.9e46*exp(-(t/tm)**2)*delt*quad(lambda x: 2*x*tm**(-2)*exp((x/tm)**2)*b14**2*pms**(-4)*(1+x/tp)**(-2), 0, t)[0]
+        lums.append(Lum[0])
+    lums=array(lums)
+    mags=-2.5*log10(lums)+111.5+absmags['slsn'][0]
+    mag_dict={}
+    mag_dict[356]=mags
+    mag_dict[472]=mags+0.24 #from average colors, Inserra et al. 2018
+    return(phase, mag_dict)
+
+def slsn_lc(xt, tm=29.94, b14=3.82, pms=1.0):
+    Ek = 1.0e51
+    k = 0.1
+    xt = float(xt)
+    xt-=15
+    if xt == 0.: xt=0.1
+    Mej=((tm*3600*24)*(13.7*3e10)**(1/2)*(1.05)**(-1)*k**(-1/2)*Ek**(1/4))**(4/3)
+    tp = 4.7*b14**(-2)*pms**2
+    delt = 1-exp(-(9*k*Mej**2*xt**(-2))/(40*pi*Ek))
+    Lum = 4.9e46*exp(-(xt/tm)**2)*delt*quad(lambda x: 2*x*tm**(-2)*exp((x/tm)**2)*b14**2*pms**(-4)*(1+x/tp)**(-2), 0, xt)[0]
+    return(Lum)
+  
+    
+
+def kcor(best_age,f1,f2,models_used_dict,redshift,vega_spec, extrapolated=True, AB=True):
+    import warnings#,exceptions
+    warnings.simplefilter("error",RuntimeWarning)
+    def my_nanmean(a):
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error')
+            try:
+                x=np.nanmean(a)
+            except RuntimeWarning:
+                x=np.NaN
+        return(x)
+        
+    kcor = []
+
+    idx = where((vega_spec[:,0]>=min(f1[:,0]))&(vega_spec[:,0]<=max(f1[:,0])))
+    (junk,restf1)=u.recast(vega_spec[idx][:,0],0.,f1[:,0],f1[:,1])
+    synth_vega = sum(vega_spec[idx][:,0]*array(restf1)*vega_spec[idx][:,1])*my_nanmean(diff(vega_spec[idx][:,0]))
+    synth_AB = sum(f1[:,0]**-1*f1[:,1])*my_nanmean(diff(f1[:,0]))
+    idx = where((vega_spec[:,0]>=min(f2[:,0]))&(vega_spec[:,0]<=max(f2[:,0])))
+    (junk,restf2)=u.recast(vega_spec[idx][:,0],0.,f2[:,0],f2[:,1])
+    nearest_vega = sum(vega_spec[idx][:,0]*array(restf2)*vega_spec[idx][:,1])*my_nanmean(diff(vega_spec[idx][:,0]))
+    nearest_AB = sum(f2[:,0]**-1*f2[:,1])*my_nanmean(diff(f2[:,0]))
+
+    
+    ### now sn spectrum
+    for model in models_used_dict.keys():
+        spec = models_used_dict[model]
+        idx = where(abs(spec[:,0]-best_age)<3.)
+        if (len(idx[0])==0.0) or (sum(spec[idx][:,2]) == 0.0): continue
+
+        if extrapolated:
+            ### extrapolated spectrum method
+            wave_plus = arange(spec[idx][:,1][-1],60000.,10.)
+            wave_minus = arange(1000.,spec[idx][:,1][-1],10.)
+            anchored_x = array([1000.]+list(spec[idx][:,1])+[60000.])
+            anchored_y = array([0.]+list(spec[idx][:,2])+[0.])
+            j1, counts_plus = u.recast(wave_plus, 0., anchored_x, anchored_y)
+            j1, counts_minus = u.recast(wave_minus, 0., anchored_x, anchored_y)
+            xx = array(list(wave_minus)+list(spec[idx][:,1])+list(wave_plus))
+            yy = array(list(counts_minus)+list(spec[idx][:,2])+list(counts_plus))
+            xx, yy = zip(*sorted(zip(xx,yy)))
+            xx, yy = array(xx), array(yy)
+            
+            idx2 = where((xx >=min(f1[:,0]/(1+redshift)))&(xx<=max(f1[:,0]/(1+redshift))))
+            (junk,restf1)=u.recast(xx[idx2],0.,f1[:,0]/(1+redshift),f1[:,1])
+            if AB:
+                synth_obs = sum(xx[idx2]*array(restf1)*yy[idx2])*my_nanmean(diff(xx[idx2]))
+            else:
+                synth_obs = sum(xx[idx2]*array(restf1)*yy[idx2])*my_nanmean(diff(xx[idx2]))
+
+            idx3 = where((xx >=min(f2[:,0]))&(xx<=max(f2[:,0])))
+            (junk,restf2)=u.recast(xx[idx3],0.,f2[:,0],f2[:,1])
+            if AB:
+                nearest_obs = sum(xx[idx3]*array(restf2)*yy[idx3])*my_nanmean(diff(xx[idx3]))
+            else:
+                nearest_obs = sum(xx[idx3]*array(restf2)*yy[idx3])*my_nanmean(diff(xx[idx3]))
+
+            ## idx2 = where((xx >=min(f2[:,0]))&(xx<=max(f2[:,0])))
+            ## (junk,restf2)=u.recast(xx[idx2],0.,f2[:,0],f2[:,1])
+            ## nearest_obs = sum(xx[idx2]*array(restf2)*yy[idx2])*my_nanmean(diff(xx[idx2]))
+
+        else:
+            ### reduce the computation by only working with wavelengths that are defined in filter throughputs
+            ## this would work fine, except at redshifts where the observed filter does not overlap the template spectra
+            idx2 = where((spec[idx][:,1]>=min(f1[:,0]/(1+redshift)))&(spec[idx][:,1]<=max(f1[:,0]/(1+redshift))))
+            (junk,restf1) = u.recast(spec[idx][idx2][:,1],0.,f1[:,0]/(1+redshift),f1[:,1])
+            if AB:
+                synth_obs = sum(spec[idx][idx2][:,1]*array(restf1)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
+            else:
+                synth_obs = sum(spec[idx][idx2][:,1]*array(restf1)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
+        
+            idx2 = where((spec[idx][:,1]>=min(f2[:,0]))&(spec[idx][:,1]<=max(f2[:,0])))
+            (junk,restf2) = u.recast(spec[idx][idx2][:,1],0.,f2[:,0],f2[:,1])
+            if AB:
+                nearest_obs = sum(spec[idx][idx2][:,1]*array(restf2)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
+            else:
+                nearest_obs = sum(spec[idx][idx2][:,1]*array(restf2)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
+            ## synth_obs = sum(spec[idx][idx2][:,1]*array(restf1)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
+        
+            ## idx2 = where((spec[idx][:,1]>=min(f2[:,0]))&(spec[idx][:,1]<=max(f2[:,0])))
+            ## (junk,restf2) = u.recast(spec[idx][idx2][:,1],0.,f2[:,0],f2[:,1])
+            ## nearest_obs = sum(spec[idx][idx2][:,1]*array(restf2)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
+
+        try:
+            kc = -1*(2.5*log10(synth_obs/nearest_obs)-2.5*log10(synth_vega/nearest_vega))
+        except:
+            kc = float('Nan')
+        if AB:
+            try:
+                kc = -1*(-2.5*log10(1.+redshift)+2.5*log10(synth_obs/nearest_obs)-2.5*log10(synth_AB/nearest_AB))
+            except:
+                float('Nan')
+        kcor.append(kc)
+    if not kcor:
+        result=(float('Nan'),float('Nan'))
+    elif len(kcor)==1 and kcor[0]!=kcor[0]:
+        result=(float('Nan'),float('Nan'))
+    else:
+        try:
+            result=(my_nanmean(kcor),nanstd(kcor))
+        except:
+            result=(float('Nan'),float('Nan'))
+    return(result)
+
+
+
+def ext_dist_Ia(ext,observed_filter,redshift,passskiprow,passwavemult):
+    from scipy.optimize import curve_fit
+    f1 = m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_V.dat'
+    w1 = get_central_wavelength(f1, wavemult=0.1)/1e3
+    w2 = get_central_wavelength(observed_filter, skip=passskiprow, wavemult=passwavemult)/1e3/(1.0+redshift)
+    A_1 = calzetti(array([w1]))
+    A_2 = calzetti(array([w2]))
+
+
+    Jha = loadtxt(software+'/templates/Jha_ext.txt')
+    Jha[:,0] = Jha[:,0]/A_1*A_2
+    p0 = [1.,1.]
+    p1,pcov = curve_fit(u.exp_fit,Jha[:,0], Jha[:,1], p0=p0)
+    norm = quad(u.exp_fit,0., inf, args=tuple(p1))[0]
+    return(u.exp_fit(ext,*p1)/norm)
+    
+
+def ext_dist(ext,observed_filter,redshift,passskiprow, passwavemult, Rv=4.05, obs_extin='nominal'):
+    from scipy.optimize import curve_fit
+
+    if obs_extin=='nominal': #shallowest
+        lambda_v = 0.187
+    elif obs_extin=='steep':
+        lambda_v= 5.36 #from HP02
+        #lambda_v=9.72 #from HBD98
+    else:## assuming 'shallow'
+        lambda_v = 1 #from Kelly12
+
+    f1 = m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_V.dat'
+    w1 = get_central_wavelength(f1, wavemult=0.1)/1e3
+    w2 = get_central_wavelength(observed_filter, skip=passskiprow, wavemult=passwavemult)/1e3/(1.0+redshift)
+    A_1 = calzetti(array([w1]),Rv=Rv)
+    A_2 = calzetti(array([w2]),Rv=Rv)
+
+    AL = ext*A_2/A_1
+    ## PAL = scipy.stats.expon.pdf(AL,scale=1/lambda_v)
+    ## p1 = [lambda_v, -lambda_v]
+    ## norm = quad(u.exp_fit,0., inf, args=tuple(p1))[0]
+    ## PAL = PAL/norm
+    PAL = abs(1/lambda_v)*scipy.stats.expon.pdf(AL,scale=1/lambda_v)
+    return(PAL[0])
+
+def ext_dist_ccsn_old(ext,observed_filter,redshift,passskiprow, passwavemult,obs_extin='nominal',observed=False):
+    
+    if obs_extin=='nominal': observed=True
+    from scipy.optimize import curve_fit
+    
+    if observed:
+        f1 = m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_V.dat'
+    else:
+        f1 = m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_B.dat'
+    w1 = get_central_wavelength(f1, wavemult=0.1)/1e3
+    w2 = get_central_wavelength(observed_filter, skip=passskiprow, wavemult=passwavemult)/1e3/(1.0+redshift)
+    A_1 = calzetti(array([w1]))
+    A_2 = calzetti(array([w2]))
+
+    if observed:
+        if not os.path.isfile(software+'/templates/ext_model.pkl'):
+            f = open(software+'/templates/ext_model.txt','r')
+            lines = f.readlines()
+            f.close()
+            Av=[]
+            for line in lines:
+                if line.startswith('#'):continue
+                Av.append(float(line.split()[3]))
+            Av=array(Av)
+            pickle.dump(Av,open(software+'/templates/ext_model.pkl','wb'))
+        else:
+            Av = pickle.load(open(software+'/templates/ext_model.pkl','rb'), encoding='latin1')
+        Av=Av/A_1*A_2
+        n,bins=histogram(Av,bins=5)
+        p0=[1.,1.]
+        pout, pcov = curve_fit(u.exp_fit,bins[:-1]+0.5*average(diff(bins)),n,p0=p0)
+        P_ext = abs(pout[1])*scipy.stats.expon(pout[1]).pdf(ext)
+        #pdb.set_trace()
+        return(P_ext)
+    else:
+        HBD = loadtxt(software+'/templates/HBD_ext.txt')
+        HBD[:,0]=HBD[:,0]/A_1*A_2
+        xx = arange(0.0,5.0,0.05)
+        (junk,yy)=u.recast(xx,0.,HBD[:,0],HBD[:,1])
+        yy = array(yy)
+        yy[where(yy<0)]=0.0
+        yy = yy/(sum(yy)*0.05)
+        (junk,P_ext)=u.recast([ext],0.,xx,yy)
+        return(P_ext[0])
+
+
+def calzetti(x,Rv=4.05): # in microns
+    y=2.659*(-2.156 + 1.509*(x)**(-1.)-0.198*(x)**(-2.)+0.011*(x)**(-3))+Rv
+    ii = where (x>0.63)
+    y[ii]=2.659*(-1.857 + 1.040*(x[ii])**(-1.))+Rv
+    y[where(y < 0)]=1e-4 ## arbitrary, non-negative
+    return(y)
+
+def fline(x,*p):
+    m,b = p
+    return m*x+b
+
+def fline2(x,*p):
+    m,b = p
+    return (m*x+b)*(1.0+x)
+
+
+if __name__=='__main__':
+
+    types = ['iip']#,'ib','ic']
+    redshift = 0.3
+    baseline = 60.5
+    sens = 25.40
+    dstep=3.0 ## in days
+    dmstep=0.5 ## in magnitude
+    dastep=0.5 ## in magnitude
+    parallel = False
+    Nproc=20
+    previous = 0.0
+    plot = False
+    verbose = True
+    extinction= False
+
+    rate = 3.51e-4
+    multiplier = 17.0
+    all_events = 0
+    area = 150.*(1./60.)**2*(pi/180)**2*(4.0*pi)**(-1)
+    dvol = volume.run(redshift+0.2)-volume.run(redshift-0.2)
+    
+    integ = False
+    for type in types:
+        type=[type]
+        if integ :
+            tc1=run(redshift-0.2,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction)
+            tc2=run(redshift+0.2,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction)
+            xx =array([redshift - 0.2, redshift+0.2])
+            yy = array([tc1,tc2])
+            p0=[1.0,0.0]
+            pout = curve_fit(fline,xx,yy,p0=p0)[0]
+            tc = quad(fline2,xx[0],xx[1],args=tuple(pout))[0]/diff(xx)
+        else:
+            tc=run(redshift,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction)*(1.0+redshift)
+
+        print("Control Time = %2.2f days" %(tc*365.25))
+        nevents = tc*dvol*area*rate*multiplier
+        print("%2.1f %s events" %(nevents, type[0]))
+        all_events += nevents
+    print("%2.1f total events" %all_events)
