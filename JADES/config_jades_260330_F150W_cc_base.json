@@ -8,7 +8,7 @@
     "sntypes" : ["iip", "iil", "iin", "ic", "ib"],
     "imf_evol" : null,
     "extinction" : "true",
-    "obs_extin":"extra",
+    "obs_extin":"nominal",
     "_biascor" : "flat",
     "_biascor" : "malmquist",
     "biascor" : "fractional",
