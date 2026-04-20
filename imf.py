@@ -192,7 +192,7 @@ if __name__=='__main__':
             ax.plot(log10(m),log10(10*salpeter(m)*m*log(10.)),'k-', label='Salpeter (1955)')
             ax.plot(log10(m),log10(10*kroupa(m,*p0)*m*log(10.)),'b-', label='Kroupa (2003)')
             ax.plot(log10(m),log10(10*chary(m,*p1)*m*log(10.)), 'g--', lw=3, label='Chary (2008)')
-            ax.annotate('z$\sim$%2.1f'%9, xy=(log10(m[-1])+0.1,log10(10*chary(m[-1],*p1)*m[-1]*log(10.))),
+            ax.annotate(r'z$\sim$%2.1f'%9, xy=(log10(m[-1])+0.1,log10(10*chary(m[-1],*p1)*m[-1]*log(10.))),
                         xycoords='data')#, fontsize=10.)
             for i,z in enumerate(zz):
                 mb = 0.5*(1.+z)**2.
@@ -213,7 +213,7 @@ if __name__=='__main__':
             ax.plot(log10(m),log10(10*salpeter(m)*dm*log(10.)),'k-', label='Salpeter (1955)')
             ax.plot(log10(m),log10(10*kroupa(m,*p0)*dm*log(10.)),'b-', label='Kroupa (2003)')
             ax.plot(log10(m),log10(10*chary(m,*p1)*dm*log(10.)), 'g--', lw=3, label='Chary (2008)')
-            ax.annotate('z$\sim$%2.1f'%9, xy=(log10(m[-1])+0.1,log10(10*chary(m[-1],*p1)*dm*log(10.))),
+            ax.annotate(r'z$\sim$%2.1f'%9, xy=(log10(m[-1])+0.1,log10(10*chary(m[-1],*p1)*dm*log(10.))),
                        xycoords='data')#, fontsize=10.)
             ## for i,z in enumerate(zz):
             ##     mb = 0.5*(1.+z)**2.

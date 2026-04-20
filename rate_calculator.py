@@ -43,7 +43,17 @@ vol_frac_b={ # Richardson et al. 2014
     'ic' : 0.199,
     }
 
-vol_frac=vol_frac_a
+vol_frac_c= { ## To reproduce Dahlen et al. 2012
+    'iip': 0.548,
+    'iin': 0.051,
+    'iil': 0.061,
+    'ib' : 0.170,
+    'ic' : 0.170,
+    }
+
+    
+
+vol_frac=vol_frac_c
 
 absmags_li_2011 = {
     'iip': [-15.66, 1.23, 0.16],
@@ -67,7 +77,17 @@ absmags_richardson_2014 = {
     ## 'slsn': [-30, 2.5,0.0], ## from Whalen et al. 2013
     }
 #
-absmags=absmags_richardson_2014
+
+absmags_dahlen_2012 = {
+    'iip': [-16.67, 1.12],
+    'iin': [-18.82, 0.92],
+    'iil': [-17.23, 0.38],
+    'ib' : [-19.38, 0.46],
+    'ic' : [-17.07, 0.49],
+    }
+    
+
+absmags=absmags_dahlen_2012
 verbose = True
 
 #absmag_new = {}
@@ -77,12 +97,12 @@ verbose = True
 
 def snrates(z,*p):
     A,B,C,D=p
-    k = 0.0091*(.70)**2. ## for low-mass core-collapse supernovaae
+    k = 0.007 ## for low-mass core-collapse supernovaae
     return(1e4*k*A*((1+z)**C)/(1+((1+z)/B)**D))
 
 def cc_snrates(z,type):
     #k = 0.0091*(.70)**2. ## for low-mass core-collapse supernovaae
-    k = 0.007*(.70)**2. ## for low-mass core-collapse supernovaae
+    k = 0.007 ## for low-mass core-collapse supernovaae
     #return(1e4*k*vol_frac[type]*rz.sfr_2020(z))
     return(1e4*k*rz.sfr_2020(z)) ## I'm removing volumetric fraction to use iip rates as a proxy
 
@@ -130,33 +150,26 @@ def fline(x,*p):
     m,b = p
     return m*x+b
 
-def fline2(x,*p):
-    m,b = p
-    return (m*x+b)/(1.0+x)
 
 
 def run(redshift2, redshift1, rate_guess, number_guess,
         types=['ia'],Nproc=1,extinction=True,obs_extin=True,survey=None, cadence_file=None, passband=None,
-        verbose=verbose, maglim=22., parallel=True, integ=True, passskiprow=1, passwavemult=0.1,
+        verbose=verbose, maglim=22., parallel=True, box_tc=True, passskiprow=1, passwavemult=0.1,
         dstep=0.5, dmstep=0.1, dastep=0.1,
+        biascor=None, review = False,
         ratefile=None, eventtable=None):
     rate=0.0
     N={}
     denom={}
     redshift = (redshift2+redshift1)/2.
-    print('z=%2.1f rg=%2.2f ng=%2.1f' %(redshift, rate_guess, number_guess))
+    print('z=%2.2f rg=%2.2f no=%2.1f' %(redshift, rate_guess, number_guess))
     rate_guess = rate_guess*1.0e-4
     
-    ## types=['iip','iin','iil','ib','ic']
-    ## types = ['ia']
-    ## types=['iil']
-    ## types = ['slsn']
-
-
     ### Survey Constants
     #tess_area = (60.)**2 ## a square degree, to put the final number in per sq. degree
     #tess_sens = 17.0 ## mag
     #survey = make_cadence_table(types,redshift, tess_sens=maglim)
+
     if cadence_file and not survey:
         survey = loadtxt(cadence_file)
     else:
@@ -165,36 +178,42 @@ def run(redshift2, redshift1, rate_guess, number_guess,
             survey = array([list(survey)])
         else:
             survey = get_unique_visits(survey)
-        Dvol = volume.run(redshift2)-volume.run(redshift1)
+        Dvol = volume.run(redshift2, qm=0.3, ql=0.7, ho=70)-volume.run(redshift1, qm=0.3, ql=0.7, ho=70)
         
     tc_tot=0
+    inv_tc_tmp=0
+    tc_tmp=[]
     for i,item in enumerate(survey):
         baseline=item[0]
         area = item[1]
         area_frac = area * (1./60.)**2*(pi/180)**2*(4.0*pi)**(-1)
-        #sens= item[2]
-        sens =maglim
+        sens = maglim
         prev = item[3]
         for type in types:
-            if not integ:
-                tc = control_time.run(redshift, baseline, sens, dstep=10, Nproc=Nproc, parallel=parallel,
+
+            if not box_tc:
+                tc = control_time.run(redshift, baseline, sens, Nproc=Nproc, parallel=parallel,
                                       extinction=extinction, obs_extin=obs_extin,
                                       type=[type], prev=prev, passband=passband,
                                       passwavemult=passwavemult, passskiprow=passskiprow,
-                                      verbose=verbose, plot=False)
+                                      dstep=dstep, dmstep=dmstep, dastep=dastep,
+                                      biascor=biascor, review=review,
+                                      verbose=verbose, plot=True)
             else:
                 tc1 = control_time.run(redshift1, baseline, sens, Nproc=Nproc, parallel=parallel,
                                        extinction=extinction, obs_extin=obs_extin,
                                        type=[type], prev=prev,passband=passband,
                                        passwavemult=passwavemult, passskiprow=passskiprow,
                                        dstep=dstep, dmstep=dmstep, dastep=dastep,
+                                       biascor=biascor, review=review,
                                        verbose=verbose)
                 tc2 = control_time.run(redshift2, baseline, sens, Nproc=Nproc, parallel=parallel,
                                        extinction=extinction, obs_extin=obs_extin,
                                        type=[type], prev=prev,passband=passband,
                                        passwavemult=passwavemult, passskiprow=passskiprow,
                                        dstep=dstep, dmstep=dmstep, dastep=dastep,
-                                       verbose=verbose)
+                                       biascor=biascor, review=review,
+                                       verbose=verbose, plot=True)
                 xx =array([redshift1, redshift2])
                 yy = array([tc1,tc2])
                 yy[isnan(yy)]=0.0 ## remove any nans
@@ -202,9 +221,12 @@ def run(redshift2, redshift1, rate_guess, number_guess,
                 pout = curve_fit(fline,xx,yy,p0=p0)[0]
                 tc = quad(fline,xx[0],xx[1],args=tuple(pout))[0]/diff(xx)
                 tc = tc[0]
+            ## tc = tc/(1+redshift)*0.7**3 #### this line needs to be deleted!!
             exp_num = rate_guess*(tc*Dvol*area_frac)
 
-            print("Mean Control Time= %4.2f observed frame days" %(tc*365.25))
+            print("Mean Control Time of type %s = %4.2f rest frame days" %(type.upper(), tc*365.25))
+            print("Volume probed = %.2f x10^4 Mpc^3 @ z= %.2f" %(area_frac*Dvol/1e4, redshift))
+
             try:
                 multiplier = item[-1]
             except:
@@ -215,11 +237,16 @@ def run(redshift2, redshift1, rate_guess, number_guess,
                 N[type]=exp_num*multiplier
             if verbose: print('%d %s %2.1f' %(i,type, N[type]))
             tc_tot += tc*multiplier
+            tc_tmp.append(tc*multiplier)
+        print("iteration %d %2.2f %s" %(i, sum(list(N.values())), ', '.join(list(map(str,item)))))
+        print("\n")
 
-        print("%d %2.2f %s" %(i, sum(list(N.values())), ','.join(list(map(str,item)))))
-        if verbose: print("\n")
-        
-    Nexp = sum(list(N.values()))
+    print('-------\n')
+    Nexp = sum(list(N.values()))/len(types)
+    tc_tot = tc_tot/len(types)
+
+    ## pdb.set_trace()
+    
     print('Redshift= %2.2f (%2.2f - %2.2f)' %(redshift,redshift1, redshift2))
     if Nexp > 1.0:
         Nexp_hi,Nexp_lo = poisson_error(Nexp)
@@ -240,6 +267,7 @@ def run(redshift2, redshift1, rate_guess, number_guess,
     Rerr_hi = Nobs_hi/(tc_tot*Dvol*area_frac)*1e4-Robs
     Rerr_lo = Robs-Nobs_lo/(tc_tot*Dvol*area_frac)*1e4
 
+    print('Total Control Time = %.2f days' %(tc_tot*365.25))
     print('Rate from %2.1f expected events to %2.1f mag: R=%2.2f+%2.2f-%2.2f' %(number_guess, sens, Robs, Rerr_hi, Rerr_lo))
     print('Number expected to %2.1f mag from expected rate of R=%2.2f: N=%2.1f+%2.1f-%2.1f' %(sens, rate_guess*1e4, Nexp, Nexp_hi-Nexp, Nexp-Nexp_lo))
     print('-------\n')
@@ -248,9 +276,10 @@ def run(redshift2, redshift1, rate_guess, number_guess,
     print('[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f],'
           %(redshift, redshift1, redshift2, Robs, Rerr_hi, Rerr_lo))
     f=open(ratefile,'a')
-    f.write('%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f\n'
+    f.write('%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.1f,%.3f,%.2f,%.2f\n'
             %(redshift, redshift1, redshift2, Robs, Rerr_hi, Rerr_lo,
-              Nexp, Nexp_hi-Nexp, Nexp-Nexp_lo, Nobs)
+              Nexp, Nexp_hi-Nexp, Nexp-Nexp_lo, Nobs, tc_tot,
+              area_frac*Dvol*1e-4, rate_guess*1e4)
             )
     f,close()
     return([Nexp, Nexp_hi, Nexp_lo, tc_tot])
@@ -293,6 +322,9 @@ def main(configfile=None):
     clobber = json.loads(config['clobber'])
     verbose = json.loads(config['verbose'])
 
+    #review
+    review = json.loads(config['review'])
+    
     #survey
     sntypes = config['sntypes']
     imf_evol = config['imf_evol']
@@ -302,6 +334,8 @@ def main(configfile=None):
         if obs_extin==True: obs_extin='nominal' ## for backward compatabilty
     except:
         obs_extin = config['obs_extin']
+    biascor = config['biascor']
+
     cadence_file=config['cadence_file']
     itermag = json.loads(config['itermag'])
     passband = config['passband']
@@ -323,6 +357,7 @@ def main(configfile=None):
         falsetable = config['outfile_numbers']
 
     Nbins = config['nbins']
+    redshift_binning = config['redshift_binning']
     if not Nbins: Nbins = 3
 
     if multiproc:
@@ -333,10 +368,10 @@ def main(configfile=None):
 
 
     ## some for setting the fineness of SN parameter eval
-    dstep=config['mag_step']
+    dstep=config['day_step']
     dmstep=config['abs_mag_step']
     dastep=config['extinction_step']
-    integ=json.loads(config['box_tc'])
+    box_tc=json.loads(config['box_tc'])
 
     if not os.path.isfile(outfile) or clobber:
         if falseevents and os.path.isfile(falsetable):
@@ -344,9 +379,21 @@ def main(configfile=None):
             redshifts = tmp[:,-2]
             redshifts=append(redshifts,tmp[-1,-1])
             ng = tmp[:,1]
-        elif not eventtable:
+        elif falseevents:
             print('No event table')
-            pdb.set_trace()
+            print('Generating...')
+            ## redshifts = arange(5, 10.5, 0.5)
+            a1 = arange(0,0.5,0.1) #to get a bit more resolution at low-z
+            a2 = arange(0.5,10,0.5) #resolution not necessary at high-z
+            redshifts=concatenate((a1,a2),)
+            if redshifts[0]==0: redshifts[0]=0.001 #redhift==0 problem
+            ng = ones(len(redshifts)-1)
+            ## the following might be commented out for testing
+            if redshift_binning is None:
+                redshift_bins = stats.mstats.mquantiles(redshifts, splits)
+            else:
+                redshift_bins = array(redshift_binning)
+            ng, redshifts = histogram(redshifts, redshift_bins)
         else:
             sn_table = pd.read_csv(eventtable, sep='\t')
             Nbins = Nbins
@@ -369,13 +416,16 @@ def main(configfile=None):
                     pdb.set_trace()
                 sne_select = sn_table.where(sn_condition)
                 sne_select['Redshift']=sne_select['z_host']
-                redshift_bins = stats.mstats.mquantiles(sne_select['Redshift'][~np.isnan(sne_select['Redshift'])], splits)
-
+                if redshift_binning is None:
+                    redshift_bins = stats.mstats.mquantiles(sne_select['Redshift'][~np.isnan(sne_select['Redshift'])], splits)
+                else:
+                    redshift_bins = array(redshift_binning)
                 ### need a more elegant counter than this soon.
                 ng, redshifts = histogram(sne_select['Redshift'][~np.isnan(sne_select['Redshift'])], redshift_bins)
                 ax = subplot(111)
                 style = {'facecolor': 'none', 'edgecolor': 'C0', 'linewidth': 3}
-                ax.hist(sne_select['Redshift'][~np.isnan(sne_select['Redshift'])], redshift_bins, label='%.1f total'%(sum(ng)),**style)
+                ax.hist(sne_select['Redshift'][~np.isnan(sne_select['Redshift'])],
+                        redshift_bins, label='%.1f total'%(sum(ng)),**style)
                 ax.set_xlabel('Redshift')
                 ax.set_xlim(0,6)
                 if 'ia' in sntypes:
@@ -384,29 +434,9 @@ def main(configfile=None):
                     ax.set_ylabel('Number of CCSNe')
                 ax.legend(loc=1)
                 savefig('tmp1.png')
-                clf()                
-            else:
-                ## dzza=0.001
-                ## redshift_tmp=arange(0,10+dzza,dzza)
-                ## rv = zeros(len(redshift_tmp))
-                ## for index, row in sn_table.iterrows():
-                ##     if row['z_type']=='spec':
-                ##         zz = row['z']
-                ##         dzz = dzza
-                ##     else:
-                ##         zz = row['z']
-                ##         dzz = max(row['z']-row['z16'],row['z85']-row['z'])
-                ##     if 'ia' in sntypes:
-                ##         rv_tmp = stats.norm.pdf(redshift_tmp, loc=zz, scale=dzz)*row['pIa']
-                ##     elif (('iil' in sntypes) or ('iip' in sntypes)
-                ##           or ('ic' in sntypes) or ('ib' in sntypes) or ('iin' in sntypes)):
-                ##         rv_tmp1 = stats.norm.pdf(redshift_tmp, loc=zz, scale=dzz)*row['pII']
-                ##         rv_tmp2 = stats.norm.pdf(redshift_tmp, loc=zz, scale=dzz)*row['pIbc']
-                ##         rv_tmp=rv_tmp1+rv_tmp2
-                ##     else:
-                ##         print('Only set for SNe Ia and CCSNe\n')
-                ##         pdb.set_trace()
-                ##     rv+=rv_tmp
+                clf()
+                
+            else: #not determinate
                 dzza=0.001
                 redshift_tmp=arange(0,10+dzza,dzza)
                 rv = zeros(len(redshift_tmp))
@@ -415,18 +445,21 @@ def main(configfile=None):
                     if row['pIa']==row['pII']==row['pIbc']==-99: continue
                     zz = row['z_host']
                     dzz = row['z_host_err']
-                    if ((dzz == -99.0) | (isnan(dzz))): dzz = dzza
+                    if ((dzz == -99.0) | (isnan(dzz)) | (dzz==0.0)): dzz = dzza
                     if 'ia' in sntypes:
+                        if isnan(row['pIa']): continue
                         rv_tmp = stats.norm.pdf(redshift_tmp, loc=zz, scale=dzz)*row['pIa']
                     elif (('iil' in sntypes) or ('iip' in sntypes)
                           or ('ic' in sntypes) or ('ib' in sntypes) or ('iin' in sntypes)):
                         rv_tmp1 = stats.norm.pdf(redshift_tmp, loc=zz, scale=dzz)*row['pII']
                         rv_tmp2 = stats.norm.pdf(redshift_tmp, loc=zz, scale=dzz)*row['pIbc']
-                        rv_tmp=rv_tmp1+rv_tmp2
+                        stack = dstack((rv_tmp1, rv_tmp2))
+                        rv_tmp = nansum(stack, axis=2)[0]
+                        ## rv_tmp=rv_tmp1+rv_tmp2 ## this method doesn't handle nan's all that well
                     else:
                         print('Only set for SNe Ia and CCSNe\n')
-                        pdb.set_trace()
-                    rv+=rv_tmp
+                    if not isnan(sum(rv_tmp)):
+                        rv+=rv_tmp
                 pv = cumsum(rv)*dzza#/sum(rv)
 
                 ax = subplot(111)
@@ -450,24 +483,30 @@ def main(configfile=None):
                 ax.legend(loc=1)
                 savefig('tmp2.png')
                 clf()
-                
-                bins=zeros(Nbins+1)
-                for i,split in enumerate(splits):
-                    if i==0: continue
-                    ii =where(pv/pv[-1]<=splits[i])
-                    bins[i]=redshift_tmp[ii][-1]
-                ii = where(pv/pv[-1] < 0.01)
-                bins[0]=redshift_tmp[ii][-1]
-                ii = where((max(pv)-pv)/pv[-1] < 0.01)
-                bins[-1]=redshift_tmp[ii][0]
 
-                ng = zeros(Nbins)
+                if redshift_binning is not None:
+                    bins = array(redshift_binning)
+                else:
+                    bins=zeros(Nbins+1)
+                    for i,split in enumerate(splits):
+                        if i==0: continue
+                        ii =where(pv/pv[-1]<=split)
+                        try:
+                            bins[i]=redshift_tmp[ii][-1]
+                        except:
+                            pdb.set_trace()
+                    ii = where(pv/pv[-1] < 0.001)
+                    bins[0]=redshift_tmp[ii][-1]
+                    ii = where((pv[-1]-pv)/pv[-1] < 0.001) #set to 1/1000 of a difference. Could be smaller.
+                    bins[-1]=redshift_tmp[ii][0]
+                ng = zeros(len(bins)-1,)
                 for i,bin in enumerate(bins):
                     if i == 0: continue
-                    ii = where((redshift_tmp>bins[i-1])&(redshift_tmp < bins[i]))
+                    ii = where((redshift_tmp>bins[i-1])&(redshift_tmp <= bins[i]))
                     ng[i-1] = sum(rv[ii])*0.001
                 redshifts = bins
         med_z = (redshifts[1:]+redshifts[:-1])/2.
+        ## pdb.set_trace()
         
         if 'ia' in sntypes:
             rg = array(snrates_Ia(med_z))## for SNe Ia, from Strolger et al. 2020
@@ -486,7 +525,7 @@ def main(configfile=None):
                     den = quad(imf.kroupa1,0.1,350,args=tuple(p0))[0]
                     k_z.append(num/den)
                 k_z = array(k_z)
-                k_z = 1.e4*(.70)**2.*k_z
+                k_z = 1.e4*k_z
                 rg = k_z * sfrg#*vol_frac[type]
             else:
                 pdb.set_trace()
@@ -500,7 +539,7 @@ def main(configfile=None):
                 ## k=quad(imf.salpeter,50,350)[0]/quad(imf.salpeter1,50,350)[0]
                 p0=[0.5,1.]
                 k = quad(imf.kroupa,50,350,args=tuple(p0))[0]/quad(imf.kroupa1,0.1,350,args=tuple(p0))[0]
-                rg =  1.e4*(.70)**2.*k*sfrg
+                rg =  1.e4*k*sfrg
                 rg = rg *0.022
                 
             elif imf_evol=='dave':
@@ -515,7 +554,7 @@ def main(configfile=None):
                     den = quad(imf.kroupa1,0.1,350,args=tuple(p0))[0]
                     k_z.append(num/den)
                 k_z = array(k_z)
-                k_z = 1.e4*(.70)**2.*k_z ## the factor of 10 accounts for fewer really high mass stars in IMF
+                k_z = 1.e4*k_z ## the factor of 10 accounts for fewer really high mass stars in IMF
                 rg = k_z * sfrg
                 #rg = rg *10. ## a guess, really, at efficiency
                 rg = rg *0.022 ## a guess, really, at efficiency
@@ -526,7 +565,6 @@ def main(configfile=None):
 
         survey = loadtxt(cadence_file)
         if itermag:
-            ## mags = arange(18.0,33.0,0.1)
             mags = arange(24, 31, 2)
         else:
             try:
@@ -539,7 +577,7 @@ def main(configfile=None):
         out_rate_file = outfile.replace('.pkl','.txt')
         if os.path.isfile(out_rate_file): os.remove(out_rate_file)
         f=open(out_rate_file,'a')
-        f.write('#z,z_low,z_hi,R,R_+err,R_-err,N_exp,N_+err,N_-err,Nobs\n')
+        f.write('#z,z_low,z_hi,R,R_+err,R_-err,N_exp,N_+err,N_-err,Nobs,tc_rest,Dvol,R_g\n')
         f.close()
         for j,mag in enumerate(mags):
             for i,redshift in enumerate(redshifts):
@@ -552,12 +590,14 @@ def main(configfile=None):
                                         verbose=verbose, extinction=extinction, obs_extin=obs_extin,
                                         survey = survey,
                                         cadence_file = None,
-                                        integ=integ,
+                                        box_tc=box_tc,
                                         dstep=dstep, dmstep=dmstep, dastep=dastep,
                                         passwavemult=passwavemult,
                                         passskiprow=passskiprow,
                                         eventtable=eventtable,
                                         ratefile=out_rate_file,
+                                        biascor=biascor,
+                                        review = review,
                                         )
                 numbers.append([mag, num, nhi, nlo, (redshifts[i]+redshifts[i-1])/2., redshifts[i-1], redshifts[i]])
         numbers=array(numbers)

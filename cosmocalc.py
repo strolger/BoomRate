@@ -74,7 +74,7 @@ def luminosity_distance(z, qm, ql, h, integral):
         d = (1+z)*(1/(sqrt(abs(qk))))*co/h*sin(sqrt(abs(qk))*integral)
     else: #Q=1
         d=(1+z)*(co/h*integral)
-    mu = 5*0.434*log10(d)+25
+    mu = 5*log10(d)+25
     peak = mu - 19.5;
     return(d,mu,peak)
         

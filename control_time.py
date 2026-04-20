@@ -1,4 +1,4 @@
-#!/usr/bin/env pythonobs
+#!/usr/bin/env python
 #### Note: Update with Holwerda extinction
 
 
@@ -18,6 +18,8 @@ import volume
 import multiprocessing
 from functools import partial
 
+from astropy.convolution import convolve, Box1DKernel, Gaussian1DKernel
+
 import warnings#,exceptions
 warnings.simplefilter("error",RuntimeWarning)
 
@@ -26,6 +28,10 @@ m_root = os.environ['HOME']
 software = os.path.dirname('/'.join(os.path.realpath(__file__).split('/')[:-1]))
 sndata_root = m_root+'/Other_codes/SNANA/SNDATA_ROOT'
 model_path = sndata_root+'/snsed/non1a'
+
+
+rcParams['figure.figsize']=12,9
+rcParams['font.size']=16.0
 
 
 vol_frac_a={ # Li et al. 2011
@@ -44,10 +50,19 @@ vol_frac_b={ # Richardson et al. 2014
     'ib' : 0.099,
     'ic' : 0.199,
     }
+vol_frac_c= { ## To reproduce Dahlen et al. 2012
+    'iip': 0.548,
+    'iin': 0.051,
+    'iil': 0.061,
+    'ib' : 0.170,
+    'ic' : 0.170,
+    }
 
-vol_frac=vol_frac_a
+    
 
-template_peak = {
+vol_frac=vol_frac_c
+
+template_peak = { ##the assumed normalization for the SNANA templates
     'iip': -16.05,
     'iin': -17.05,
     'iil': -16.33,
@@ -69,8 +84,8 @@ absmags_li_2011 = {
 
 absmags_richardson_2014 = {
     'iip': [-16.80, 0.97, 0.37],
-    'iin': [-16.86, 1.61, 0.59],
-    #'iin': [-18.62, 1.48, 0.32],
+    #'iin': [-16.86, 1.61, 0.59],
+    'iin': [-18.62, 1.48, 0.32],
     'iil': [-17.98, 0.90, 0.34],
     'ib' : [-17.54, 0.94, 0.33],
     'ic' : [-16.67, 1.04, 0.40],
@@ -79,7 +94,17 @@ absmags_richardson_2014 = {
     'slsn': [-21.7, 0.4,0.0], ## from Quimby+2013, by way of Gal-Yam 2018
     ## 'slsn': [-30, 2.5,0.0], ## from Whalen et al. 2013
     }
-absmags=absmags_richardson_2014
+absmags_dahlen_2012 = {
+    'iip': [-16.67, 1.12],
+    'iin': [-18.82, 0.92],
+    'iil': [-17.23, 0.38],
+    'ib' : [-19.38, 0.46],
+    'ic' : [-17.07, 0.49],
+    }
+    
+
+absmags=absmags_dahlen_2012
+
 
 #absmag_new = {}
 #for key in absmags.keys(): absmag_new[key]=[absmags[key][0]-absmags[key][2],absmags[key][1],absmags[key][2]]
@@ -110,7 +135,7 @@ color_cor_slsn={
 def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
         parallel=False, extinction=True, obs_extin=True, Nproc=23, prev=45.,
         passband = None, passskiprow=1, passwavemult=1000.,
-        plot=False, verbose=False):
+        plot=False, verbose=False, review=False, biascor='flat'):
     sndata_root = m_root+'/Other_codes/SNANA/SNDATA_ROOT'
     model_path = sndata_root+'/snsed/non1a'
     
@@ -132,11 +157,10 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
     if passband is not None:
         observed_filter = passband
     else:
-        observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/JWST/NIRCAM/F444W_NRC_and_OTE_ModAB_mean.txt'
-        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/JWST/NIRCAM/F322W2_NRC_and_OTE_ModAB_mean.txt'
-        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_V.dat'
-        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/HST/HST_Candles/WFC3_IR_F160W.dat'
-        ## observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/HST/HST_GOODS/F850LP_ACS.dat'
+        #observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/JWST/NIRCAM/F444W_NRC_and_OTE_ModAB_mean.txt'
+        #observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/HST/HST_GOODS/F850LP_ACS.dat'
+        observed_filter=m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/HST/HST_Candles/ACS_WFC_F435W.dat'
+        passwavemult=0.1
     ofilter_cen = get_central_wavelength(observed_filter,skip=passskiprow,wavemult=passwavemult)
     if verbose: print('observed filter effective wavelength= %4.1f nm'%ofilter_cen)
 
@@ -153,7 +177,9 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
         rest_age,rflc,models_used = rest_frame_lightcurve(type,dstep=dstep,verbose=verbose)
         best_rest_filter = min(rflc.keys(), key=lambda x:abs(x-(ofilter_cen/(1+redshift))))
         if verbose: print('best rest frame filter match wavelength= %4.1f nm'%best_rest_filter)
-        observed_frame_lightcurve=mean_pop(array(rflc[best_rest_filter]))-template_peak[type[0]]+absmags[type[0]][0]
+        observed_frame_lightcurve=mean_pop(array(rflc[best_rest_filter]))#-template_peak[type[0]]+absmags[type[0]][0]
+        observed_frame_lightcurve[:,0]= convolve(observed_frame_lightcurve[:,0], Gaussian1DKernel(dstep), boundary='extend') #smoothing out composite
+        observed_frame_lightcurve = observed_frame_lightcurve -template_peak[type[0]]+absmags[type[0]][0]
     else:
         if verbose: print('getting best rest-frame lightcurve SNIA ...')
         rest_age, rflc = rest_frame_Ia_lightcurve(dstep=dstep,verbose=verbose)
@@ -205,9 +231,21 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
             for age in ages:
                 if age not in total_age_set:
                     total_age_set.append(age)
-        
 
-    f1 = loadtxt(observed_filter,skiprows=passskiprow)## for readinging in NIRCam tempaltes
+    ## if review:
+    ##     for k,v in rflc.items():
+    ##         clf()
+    ##         ax = subplot(111)
+    ##         v=array(v)
+    ##         for ii in range(len(v)):
+    ##             ax.plot(rest_age, v[ii], label='%s'%models_used[ii])
+    ##         ax.set_ylim(-10,-20)
+    ##         ax.set_title('Filter = %d' %k)
+    ##         ax.legend()
+    ##         show()
+    ##     pdb.set_trace()
+
+    f1 = loadtxt(observed_filter,skiprows=passskiprow)
     f1[:,0]=f1[:,0]*passwavemult*10.
     
     f2 = loadtxt(filter_dict[best_rest_filter])
@@ -227,7 +265,7 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
 
     start_time = time.time()
     if parallel:
-        if verbose: print('... running parallel kcor by model SN age')
+        if verbose: print('... running parallel kcor by model SN age on %d processors' %Nproc)
         run_kcor_x= partial(kcor, f1=f1, f2=f2, models_used_dict=models_used_dict, redshift=redshift, vega_spec=vega_spec)
         pool = multiprocessing.Pool(processes=Nproc)
         result_list = pool.map(run_kcor_x, rest_age)
@@ -243,6 +281,17 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
         obs_kcor=array(obs_kcor)
     if verbose: print('kcor processing time = %2.1f seconds'%(time.time()-start_time))
 
+    ### try a low-order smooth over kcor for valid points, then extrapolate
+    if 'ia' in type:
+        obs_kcor[:,0][-1]=nanmean(obs_kcor[:,0])## add anchoring at end of kcor curve
+    else: 
+        obs_kcor[:,0][-1]=0.0## add am anchoring at end of kcor curve
+       
+    obs_kcor[:,0] = convolve(obs_kcor[:,0], Gaussian1DKernel(dstep), boundary='extend')#'fill', fill_value=nanmean(obs_kcor[:,0]))
+    ## if review:    
+    ##     clf() ; ax=subplot(111);  ax.plot(rest_age, obs_kcor[:,0], 'k-'); show()
+    ##     pdb.set_trace()
+        
     ### replace NaNs in kcor with linearly interpolated data, and constant interpolated error
     idx = where(obs_kcor[:,0]==obs_kcor[:,0])
     if len(idx[0]) > 0:
@@ -254,40 +303,57 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
         obs_kcor[:,1][where(obs_kcor[:,1]!=obs_kcor[:,1])]=0. ## remove nan's in errors.
     apl_kcor = obs_kcor[:,0]
 
+    if review:
+        clf() ; ax=subplot(111);  ax.plot(rest_age, obs_kcor[:,0], 'k-'); savefig('kcorrecton.png')
+
     ### distance modulus and time dilation
-    d, mu, peak = cosmocalc.run(redshift)
+    d, mu, peak = cosmocalc.run(redshift, qm=0.3, ql=0.7, ho=70)
     td = (1.+redshift)
 
     ## control times
     template_light_curve=[]
     prev_light_curve=[]
+    template_kcor = []
+    prev_kcor = []
     rest_base=baseline/td
     for i,age in enumerate(rest_age):
         if age - rest_base < min(rest_age):
             template_light_curve.append(999.0)
+            template_kcor.append(0)
         else:
-            #idx = where(abs(age-rest_base - rest_age)<dstep)
-            idx = where((abs(age-rest_base - rest_age)<dstep) & (abs(age-rest_base - rest_age)==min(abs(age-rest_base - rest_age))))
+            idx = where((abs(age - rest_base - rest_age)<=dstep) & (abs(age - rest_base - rest_age)==min(abs(age - rest_base - rest_age))))
             template_light_curve.append(observed_frame_lightcurve[idx][:,0][0])
+            template_kcor.append(apl_kcor[idx][0])
         if age - rest_base-prev/td < min(rest_age):
             prev_light_curve.append(999.0)
+            prev_kcor.append(0)
         else:
-            idx2 = where(abs(age-rest_base-prev/td - rest_age)<dstep)
+            idx2 = where(abs(age-rest_base-prev/td - rest_age+dstep)<=dstep)
             prev_light_curve.append(observed_frame_lightcurve[idx2][:,0][0])
+            prev_kcor.append(apl_kcor[idx2][0])
+
     template_light_curve=array(template_light_curve)
     prev_light_curve=array(prev_light_curve)
-    tot_ctrl=0.0
 
+    template_kcor = array(template_kcor)
+    prev_kcor = array(prev_kcor)
+
+    
+    tot_ctrl=0.0
 
     if verbose: print('dstep=%.1f, dmstep=%.1f, dastep=%.1f'%(dstep,dmstep,dastep))
     if plot:
+        clf()
         ax1=subplot(121)
         ax2=subplot(122)
+        ax3=ax1.inset_axes([0.9,0.0,0.08,1.0])
+        yminl=[]
+        ymaxl=[]
     ## loop on extinction function
     ext_normalization=0.0
     if extinction:
         dastep = dastep
-        darange = arange(0.,5.0+dastep,dastep)
+        darange = arange(0.,10.0+dastep,dastep)
     else:
         dastep = 1.0
         darange = [0.]
@@ -298,90 +364,115 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
         lum_normalization=0.0
         for dm in dmrange:
             f1 = 10**(-2./5.*(apl_kcor+observed_frame_lightcurve[:,0]+mu+dm+da+ccn))
-            f2 = 10**(-2./5.*(apl_kcor+template_light_curve+mu+dm+da+ccn))
+            f2 = 10**(-2./5.*(template_kcor+template_light_curve+mu+dm+da+ccn))
             diff_f = (f1 - f2)
             delta_mag = zeros(diff_f.shape)
-            try:
-                tdx = where(diff_f>0)
-            except:
-                pdb.set_trace()
+            tdx = where(diff_f>0)
             delta_mag[tdx]=-2.5*log10(diff_f[tdx])
             delta_mag[where(diff_f<=0)]=99.99
-            check = where(delta_mag==0.)
-            #efficiency=det_eff(delta_mag,mc=sens,T=0.95, S=0.4)
-            efficiency=det_eff(delta_mag,mc=sens,T=0.98, S=0.23)
+            ## efficiency=det_eff(delta_mag,mc=sens,T=0.96, S=0.38) ## for GOODS
+            efficiency=det_eff(delta_mag,mc=sens,T=1.0, S=0.30)
 
-            f3 = 10**(-2./5.*(apl_kcor+prev_light_curve+mu+dm+da+ccn))
+            f3 = 10**(-2./5.*(prev_kcor+prev_light_curve+mu+dm+da+ccn))
             diff_f2 = (f2 - f3)
             delta_mag2 = zeros(diff_f2.shape)
             tdx = where(diff_f2 > 0)
             delta_mag2[tdx]=-2.5*log10(diff_f2[tdx])
             delta_mag2[where(diff_f2<=0)]=99.99
-            check2 = where(delta_mag2==0.)
-            efficiency2=det_eff(delta_mag2,mc=sens, T=0.98, S=0.23)
-            #efficiency2=det_eff(delta_mag2,mc=sens, T=0.95, S=0.4)
+            ## efficiency2=det_eff(delta_mag2,mc=sens, T=0.96, S=0.38) ## for GOODS
+            efficiency2=det_eff(delta_mag2,mc=sens, T=1.0, S=0.30)
 
-            if plot:
-                ymin=min(apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn)-6.0
-                ymax=min(apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn)+8.5
-                ax1.plot(rest_age,apl_kcor+observed_frame_lightcurve[:,0]+mu+dm+da+ccn,'r-')
-                ax1.plot(rest_age,apl_kcor+template_light_curve+mu+dm+da+ccn,'k-')
-                ax1.plot(rest_age,apl_kcor+prev_light_curve+mu+dm+da+ccn,'k--')
-                ax2.plot(rest_age,efficiency,'k-')
-                ax2.plot(rest_age,efficiency2,'k--')
-                ax1.set_ylim(ymax,ymin)
-                ax2.set_ylim(0,1.2)
                 
             sig_m = absmags[type[0]][1]
             ## Holz & Linder GL LumFunc smoothing
             sig_gl = 0.093*(redshift)
-            sig_m = sqrt(sig_m**2+sig_gl**2)
-            
+            sig_m = 1*sqrt(sig_m**2+sig_gl**2)
+
             P_lum= scipy.stats.norm(absmags[type[0]][0],sig_m).pdf(absmags[type[0]][0]+dm)
             if extinction:
                 if 'ia' in type:
                     P_ext = ext_dist_Ia(da, observed_filter, redshift, passskiprow, passwavemult)
                 else:
-                    P_ext = ext_dist(da,observed_filter,redshift,passskiprow, passwavemult, obs_extin=obs_extin)#, Rv=8.0)
+                    P_ext = ext_dist(da,observed_filter,redshift,passskiprow,
+                                     passwavemult, obs_extin=obs_extin)#, Rv=8.0)
             else:
                 P_ext=1.0
+
+            if plot:
+                yminl.append(min(apl_kcor+observed_frame_lightcurve[:,0]+mu+da+dm+ccn)-2.0)
+                ymaxl.append(min(apl_kcor+observed_frame_lightcurve[:,0]+mu+da+dm+ccn)+4.5)
+                ax1.plot(rest_age,apl_kcor+observed_frame_lightcurve[:,0]+mu+dm+da+ccn,'r-')
+                ax1.plot(rest_age,template_kcor+template_light_curve+mu+dm+da+ccn,'k--')
+                ax1.plot(rest_age,prev_kcor+prev_light_curve+mu+dm+da+ccn, ls=':', color='0.4')
+                ax2.plot(rest_age,efficiency,'k.-')#,label='Type %s, z=%.1f'%(type[0], redshift))
+                ax2.plot(rest_age,efficiency2,'r.:')
+                ax1.set_ylim(max(ymaxl),min(yminl))
+                ax2.set_ylim(0,1.2)
+                ax1.grid()
+
+                ax1.set_xlabel('rest age (days)')
+                ax2.set_xlabel('rest age (days)')
+                ax1.set_title('%s at z=%.1f' %(type[0].upper(), redshift))
+                ax2.set_title('%s at z=%.1f' %(type[0].upper(), redshift))
+                
             if prev > 0:
-                idx = where(efficiency2 < 0.9)
+                idx = where(efficiency2 < 0.5) #if eff2 > 0.5 assume would have been detected in previous epoch
                 tot_ctrl += nansum(efficiency[idx])*P_lum*P_ext*dstep*dmstep*dastep
             else:
                 tot_ctrl += nansum(efficiency)*P_lum*P_ext*dstep*dmstep*dastep
             lum_normalization += P_lum*dmstep
         ext_normalization += P_ext*dastep
-    if plot: savefig('efficiencies.png')
-    ## fractional bias correction-- The relative number of each subtype one would expect in a volume
-    ## Using z=0.0 observations from Li et al. 2011, already corrected for malmquist bias
-    rel_num = (vol_frac[type[0]])/sum(list(vol_frac.values()))
+    if plot:
+        ax3.plot(scipy.stats.norm(absmags[type[0]][0],sig_m).pdf(absmags[type[0]][0]+dmrange),
+                 absmags[type[0]][0]+dmrange+mu+ccn+apl_kcor[where(rest_age == min(abs(rest_age)))],
+                 'k-')
+        ax3.set_xticks([])
+        ax3.set_ylim(max(ymaxl),min(yminl))
+        #≈ßax3.invert_yaxis()
+        ax1.axhline(sens, color='blue', ls=':')
+        ax1.hlines(y=sens-1.5,  xmin=0, xmax=baseline/td, color='purple', lw=3)
+        tight_layout(); savefig('efficiencies.png')
 
-
-    ## malmquist bias correction-- use this if going with some other measure of relative number
-    #rel_num=1.0
-    #rel_lum = 10.**((absmags[type[0]][0]-(sens-mu))/(-2.5))
-    #rel_num = rel_lum**(1.5)*rel_num
-
-    try:
-        #tot_ctrl=rel_num*tot_ctrl/(lum_normalization*ext_normalization)#*td
-        if ext_normalization > 1e40: 
-            tot_ctrl = 0
+    tot_ctrl=tot_ctrl/(lum_normalization*ext_normalization)
+    print('Correcting control time %.4f days by %s relative number' %(tot_ctrl, biascor))
+    if biascor == 'fractional':
+        ## fractional bias correction-- The relative number of each subtype one would expect in a volume
+        ## Using z=0.0 observations from Li et al. 2011, already corrected for malmquist bias
+        if not 'ia' in type:
+            if 'ia' in vol_frac.keys():
+                rel_num = 1.*(vol_frac[type[0]])#/(sum(list(vol_frac.values()))-vol_frac['ia'])
+            else:
+                rel_num = 1.*(vol_frac[type[0]])#/sum(list(vol_frac.values()))
         else:
-            tot_ctrl=0.5*tot_ctrl/(lum_normalization*ext_normalization)
-    except:
-        pdb.set_trace()
-    if verbose: print("Control Time= %4.2f observed frame days" %tot_ctrl)#, lum_normalization, ext_normalization)
+            rel_num = 1.0
+        print('... Relative number %.1f' %rel_num)
+    elif biascor == 'malmquist':
+        ## malmquist bias correction-- use this if going with some other measure of relative number
+        if not 'ia' in type:
+            rel_lum = 10.**((absmags[type[0]][0]-(sens-mu+mean(apl_kcor)))/(-2.5))
+            rel_num = rel_lum**(-1.5)
+        else:
+            rel_num = 1.0
+    else: ## assume flat
+        rel_num =  1.0
 
+    tot_ctrl=tot_ctrl/rel_num
+    
+    if verbose:
+        print('for %s at redshift=%.1f'%(type[0].upper(), redshift))
+        print('and SN Fraction of %.2f'%(rel_num))
+        print("Weighted Control Time= %.4f rest frame days" %tot_ctrl)
+
+        
     if plot:
         clf()
         ax = subplot(211)
-        ymin=min(apl_kcor+observed_frame_lightcurve[:,0]+mu)-1.0
-        ymax=min(observed_frame_lightcurve[:,0]+mu)+3.5
+        ymin=min(apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn)-2.0
+        ymax=min(apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn)+4.5
         xmin=(-50*td)
-        xmax=(140*td)
+        xmax=(730.5*td)
         ax.plot(rest_age*td,apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn,'r--')
-        ax.plot(rest_age*td,observed_frame_lightcurve[:,0]+mu+ccn,'k-')
+        ax.axhline(sens, color='b', ls=':')
         sig = sqrt(absmags[type[0]][1]**2.+obs_kcor[:,1]**2.)
         ax.fill_between(rest_age*td, apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn+sig,
                         apl_kcor+observed_frame_lightcurve[:,0]+mu+ccn-sig,
@@ -390,13 +481,13 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
         ax.set_ylim(ymax,ymin)
         ax.set_xlim(xmin,xmax)
         ax.set_xlabel('Observed Frame Age (Days)')
-        ax.set_ylabel('Observed Magnitude (Vega)')
+        ax.set_ylabel('Observed Magnitude (%.1f nm)' %ofilter_cen)
     
         ax2 = subplot (212)
         ymin=min(observed_frame_lightcurve[:,0])-1.0
         ymax=min(observed_frame_lightcurve[:,0])+3.5
         xmin=(-50)
-        xmax=(140)
+        xmax=(730.5)
         ax2.plot(rest_age,observed_frame_lightcurve[:,0],'k-')
         ax2.fill_between(rest_age,
                          observed_frame_lightcurve[:,0]+absmags[type[0]][1],
@@ -405,7 +496,8 @@ def run(redshift, baseline, sens, type=['iip'], dstep=3, dmstep=0.5, dastep=0.5,
         ax2.set_ylim(ymax,ymin)
         ax2.set_xlim(xmin,xmax)
         ax2.set_xlabel('Rest Frame Age (Days)')
-        ax2.set_ylabel('Closest template Abs Mag (Vega)')
+        ax2.set_ylabel('Closest Template Abs Mag (%.1f nm)' %best_rest_filter)
+        tight_layout()
         savefig('lightcurves.png')
     return(tot_ctrl/365.25)
 
@@ -476,18 +568,25 @@ def mean_pop(mag_array):
 
 def rest_frame_lightcurve(types,dstep=3,verbose=True):
     models = glob.glob(model_path+'/*.DAT')
-    rest_age = arange(-50,120,dstep)
+    rest_age = arange(-50,730.5,dstep)
     mag_dict={}
     models_used=[]
     for model in models:
         filters,mdata,type=read_lc_model(model)
         magoff = match_peak(model)
+        ## models need anchoring...
+        append(mdata, zeros(len(mdata[0]),))
+        mdata[-1][0]=rest_age[-1]; mdata[-1,1:]=5.00
+
         for cnt,filter in enumerate(filters):
             if type.lower() in types  and magoff!=0.0: ## models with no magoff are not likely reliable
                 (junk,new_y)=u.recast(rest_age,0.,mdata[:,0],mdata[:,cnt+1]+magoff)
-                if average(new_y) > 30:
-                    if verbose>1: print('Omitting ',model, filter, average(new_y))
-                    continue
+                ## if average(new_y) > 30:
+                ##     ## if verbose>1:
+                ##     print('Omitting ',model, filter, average(new_y))
+                ##     continue
+                ## else:
+                ##     print('Keeping ', model, filter, average(new_y))
                 if os.path.basename(model)[:-4] not in models_used:
                     models_used.append(os.path.basename(model)[:-4])
                 try:
@@ -499,7 +598,7 @@ def rest_frame_lightcurve(types,dstep=3,verbose=True):
 
 def rest_frame_Ia_lightcurve(dstep=3, verbose=True):
     models_dir = m_root+'/Other_codes/SNANA/SNDATA_ROOT/models/mlcs2k2/mlcs2k2.v007/'
-    rest_age = arange(-20,120,dstep)
+    rest_age = arange(-20,730.5,dstep)
     ## rest_age= arange(-20, -7, dstep) ## to limit to pre-peak discoveries
     mag_dict={}
     for model in glob.glob(models_dir+'vectors_?.dat'):
@@ -513,7 +612,7 @@ def rest_frame_Ia_lightcurve(dstep=3, verbose=True):
     
 def rest_frame_slsn_lightcurve(dstep=3, verbose=True, tm=29.94, b14=3.82, pms=1.0):
     ### from a perscription from Inserra et al. 2013
-    phase= arange(-30,120,dstep) #rest_age
+    phase= arange(-30,730.5,dstep) #rest_age
        
     Ek = 1.0e51
     k = 0.1
@@ -550,7 +649,7 @@ def slsn_lc(xt, tm=29.94, b14=3.82, pms=1.0):
   
     
 
-def kcor(best_age,f1,f2,models_used_dict,redshift,vega_spec, extrapolated=True, AB=True):
+def kcor(best_age,f1,f2,models_used_dict,redshift,vega_spec, extrapolated=True, AB=False):
     import warnings#,exceptions
     warnings.simplefilter("error",RuntimeWarning)
     def my_nanmean(a):
@@ -627,8 +726,8 @@ def kcor(best_age,f1,f2,models_used_dict,redshift,vega_spec, extrapolated=True, 
                 nearest_obs = sum(spec[idx][idx2][:,1]*array(restf2)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
             else:
                 nearest_obs = sum(spec[idx][idx2][:,1]*array(restf2)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
+
             ## synth_obs = sum(spec[idx][idx2][:,1]*array(restf1)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
-        
             ## idx2 = where((spec[idx][:,1]>=min(f2[:,0]))&(spec[idx][:,1]<=max(f2[:,0])))
             ## (junk,restf2) = u.recast(spec[idx][idx2][:,1],0.,f2[:,0],f2[:,1])
             ## nearest_obs = sum(spec[idx][idx2][:,1]*array(restf2)*spec[idx][idx2][:,2])*my_nanmean(diff(spec[idx][idx2][:,1]))
@@ -682,8 +781,9 @@ def ext_dist(ext,observed_filter,redshift,passskiprow, passwavemult, Rv=4.05, ob
         lambda_v= 5.36 #from HP02
         #lambda_v=9.72 #from HBD98
     else:## assuming 'shallow'
-        lambda_v = 1 #from Kelly12
-
+        ## lambda_v = 1 #from Kelly12
+        ## lambda_v = 0.025 ## nuclear region of Arp299, see ref. in Bondi et al. 2012
+        lambda_v =2.27 ## for dahlen 2012.
     f1 = m_root+'/Other_codes/SNANA/SNDATA_ROOT/filters/Bessell90/Bessell90_K09/Bessell90_V.dat'
     w1 = get_central_wavelength(f1, wavemult=0.1)/1e3
     w2 = get_central_wavelength(observed_filter, skip=passskiprow, wavemult=passwavemult)/1e3/(1.0+redshift)
@@ -691,10 +791,6 @@ def ext_dist(ext,observed_filter,redshift,passskiprow, passwavemult, Rv=4.05, ob
     A_2 = calzetti(array([w2]),Rv=Rv)
 
     AL = ext*A_2/A_1
-    ## PAL = scipy.stats.expon.pdf(AL,scale=1/lambda_v)
-    ## p1 = [lambda_v, -lambda_v]
-    ## norm = quad(u.exp_fit,0., inf, args=tuple(p1))[0]
-    ## PAL = PAL/norm
     PAL = abs(1/lambda_v)*scipy.stats.expon.pdf(AL,scale=1/lambda_v)
     return(PAL[0])
 
@@ -730,7 +826,6 @@ def ext_dist_ccsn_old(ext,observed_filter,redshift,passskiprow, passwavemult,obs
         p0=[1.,1.]
         pout, pcov = curve_fit(u.exp_fit,bins[:-1]+0.5*average(diff(bins)),n,p0=p0)
         P_ext = abs(pout[1])*scipy.stats.expon(pout[1]).pdf(ext)
-        #pdb.set_trace()
         return(P_ext)
     else:
         HBD = loadtxt(software+'/templates/HBD_ext.txt')
@@ -762,42 +857,53 @@ def fline2(x,*p):
 
 if __name__=='__main__':
 
-    types = ['iip']#,'ib','ic']
-    redshift = 0.3
-    baseline = 60.5
-    sens = 25.40
-    dstep=3.0 ## in days
+    # types = ['ia']
+    types = ['iip']#,'iil','iin','ib','ic']
+    #types = ['slsn']
+    redshift = 1.0
+    baseline = 365
+    sens = 29.8
+    dstep=5.0 ## in days, probably shouldn't adjust
     dmstep=0.5 ## in magnitude
     dastep=0.5 ## in magnitude
-    parallel = False
-    Nproc=20
+    parallel = True
+    Nproc=int(multiprocessing.cpu_count()-2)
     previous = 0.0
-    plot = False
+    plot = True
     verbose = True
-    extinction= False
+    extinction= True
+    if len(types)>1:
+        biascor = 'fractional'
+    else:
+        biascor = 'flat'
+    
+    if 'ia' in types:
+        rate = 5e-5
+    elif 'slsn' in types:
+        rate = 1e-9
+    else:
+        rate = 5e-4
 
-    rate = 3.51e-4
-    multiplier = 17.0
+    multiplier = 1.0
     all_events = 0
-    area = 150.*(1./60.)**2*(pi/180)**2*(4.0*pi)**(-1)
+    area = 300.*(1./60.)**2*(pi/180.)**2*(4.0*pi)**(-1)
     dvol = volume.run(redshift+0.2)-volume.run(redshift-0.2)
     
-    integ = False
+    box_tc = False
+    tc_tot=0
     for type in types:
         type=[type]
-        if integ :
+        if box_tc :
             tc1=run(redshift-0.2,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction)
-            tc2=run(redshift+0.2,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction)
+            tc2=run(redshift+0.2,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction, biascor=biascor)
             xx =array([redshift - 0.2, redshift+0.2])
             yy = array([tc1,tc2])
             p0=[1.0,0.0]
             pout = curve_fit(fline,xx,yy,p0=p0)[0]
             tc = quad(fline2,xx[0],xx[1],args=tuple(pout))[0]/diff(xx)
         else:
-            tc=run(redshift,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction)*(1.0+redshift)
-
-        print("Control Time = %2.2f days" %(tc*365.25))
-        nevents = tc*dvol*area*rate*multiplier
-        print("%2.1f %s events" %(nevents, type[0]))
-        all_events += nevents
-    print("%2.1f total events" %all_events)
+            tc=run(redshift,baseline,sens,type=type,dstep=dstep,dmstep=dmstep,dastep=dastep,verbose=verbose,plot=plot,parallel=parallel,Nproc=Nproc, prev=previous, extinction=extinction, biascor=biascor)#, obs_extin='extra')
+            tc_tot+=tc
+    print("Total Control Time = %2.4f years" %(tc_tot))
+    nevents = tc*dvol*area*rate*multiplier
+    print("%2.4f total events" %all_events)
