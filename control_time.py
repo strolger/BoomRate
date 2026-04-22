@@ -11,8 +11,10 @@ from matplotlib.font_manager import fontManager, FontProperties
 from matplotlib.ticker import MultipleLocator, FormatStrFormatter
 import datetime, time
 from matplotlib import dates as mdates
-from strolger_util import util as u
-from strolger_util import cosmocalc
+#from strolger_util import util as u
+#from strolger_util import cosmocalc
+import util as u
+import cosmocalc
 import volume
 
 import multiprocessing
@@ -571,6 +573,8 @@ def rest_frame_lightcurve(types,dstep=3,verbose=True):
     rest_age = arange(-50,730.5,dstep)
     mag_dict={}
     models_used=[]
+    print(models)
+    print("")
     for model in models:
         filters,mdata,type=read_lc_model(model)
         magoff = match_peak(model)

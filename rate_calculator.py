@@ -10,9 +10,12 @@ import os,sys,pdb,scipy,glob, time, pickle
 from pylab import *
 from scipy.optimize import curve_fit
 from scipy.integrate import quad
-from strolger_util import util as u
-from strolger_util import rates_z as rz
-from strolger_util import imf
+#from strolger_util import util as u
+#from strolger_util import rates_z as rz
+#from strolger_util import imf
+import util as u
+import rates_z_new as rz
+import imf
 import volume, control_time
 import warnings#,exceptions
 warnings.simplefilter("error",RuntimeWarning)

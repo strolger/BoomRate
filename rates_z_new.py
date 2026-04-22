@@ -8,13 +8,19 @@ from scipy.interpolate import *
 from numpy import r_
 
 from matplotlib.font_manager import fontManager, FontProperties
-from strolger_util import cosmotools
+#from strolger_util import cosmotools
+import cosmotools
 
 import warnings
 warnings.simplefilter("ignore",RuntimeWarning)
 
 par_model = [0.0134, 2.55, 3.3, 6.1] #strolger2020
 par_err = [0.0009, 0.09, 0.2, 0.2]
+
+# Added so that rate_calculator.py will run --> assuming par_model is Strolger+2020 cosmic star formation rate density history
+def sfr_2020(z):
+    p = par_model  # [0.0134, 2.55, 3.3, 6.1] from Strolger+2020
+    return csfh(z, *p)
 
 def csfh_crazy(z, *p):
     A,B,C,D = p

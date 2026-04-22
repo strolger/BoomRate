@@ -275,7 +275,8 @@ def recast(d,r,x,y):
                 yn=f(d[i])
             except:
                 yn=f_x([d[i]])
-            rn.append(float(yn))
+            #rn.append(float(yn))
+            rn.append(float(numpy.squeeze(yn))) # numpy.squeeze() added for compatibility with numpy 2.0+, which no longer allows float() to convert 0-dimensional arrays directly.
     return(d,rn)
 
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 import os,sys,pdb,scipy,glob
 from pylab import *
-from strolger_util import util as u
+#from strolger_util import util as u
+import util as u
 from scipy.integrate import quad
 from scipy.optimize import curve_fit as cf
 rcParams['font.size']=20.0
